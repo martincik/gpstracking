@@ -1,0 +1,24 @@
+{
+  "name": "gpstracking",
+  "displayName": "gpstracking",
+  "expo": {
+    "name": "gpstracking",
+    "slug": "gpstracking",
+    "version": "1.0.0",
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "bundleIdentifier": "com.martincik.gpstracking",
+      "buildNumber": "1.0.0"
+    },
+    "android": {
+      "package": "com.martincik.gpstracking",
+      "versionCode": 1
+    }
+  }
+}
