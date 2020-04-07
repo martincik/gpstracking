@@ -1,12 +1,13 @@
 import React from 'react';
 import { EventEmitter } from 'fbemitter';
-import { NavigationEvents, NavigationContainer } from '@react-navigation/native';
-import { AppState, AsyncStorage, Platform, StyleSheet, Text, View } from 'react-native';
+import { AppState, AsyncStorage, Platform, StyleSheet, Text, View, ActivityIndicator } from 'react-native';
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import * as Permissions from 'expo-permissions';
 import MapView from 'react-native-maps';
 import { FontAwesome, MaterialIcons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 
 import Button from './components/PrimaryButton';
 import Colors from './constants/Colors';
@@ -22,6 +23,7 @@ export default class App extends React.Component {
   };
 
   mapViewRef = React.createRef();
+  recording = null;
 
   state = {
     accuracy: Location.Accuracy.High,
@@ -51,6 +53,16 @@ export default class App extends React.Component {
       this.setState({
         error:
           'Location permissions are required in order to use this feature. You can manually enable them at any time in the "Location Services" section of the Settings app.',
+      });
+      return;
+    } else {
+      this.setState({ error: null });
+    }
+
+    let { status: audioStatus } = await Permissions.askAsync(Permissions.AUDIO_RECORDING);
+    if (audioStatus !== 'granted') {
+      this.setState({
+        error: 'Audio recording permissions are required in order to use this feature.',
       });
       return;
     } else {
@@ -106,6 +118,27 @@ export default class App extends React.Component {
 
     AppState.removeEventListener('change', this.handleAppStateChange);
   }
+  async startRecordingAudio() {
+    if (this.recording !== null) {
+      await this.recording.unloadAsync();
+      this.recording = null;
+    }
+
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      interruptionModeIOS: Audio.INTERRUPTION_MODE_IOS_DO_NOT_MIX,
+      playsInSilentModeIOS: true,
+      shouldDuckAndroid: true,
+      interruptionModeAndroid: Audio.INTERRUPTION_MODE_ANDROID_DO_NOT_MIX,
+      playThroughEarpieceAndroid: false,
+      staysActiveInBackground: true,
+    });
+
+    const recording = new Audio.Recording();
+    await recording.prepareToRecordAsync(Audio.RECORDING_OPTIONS_PRESET_HIGH_QUALITY);
+    await recording.startAsync();
+    this.recording = recording;
+  }
 
   async startLocationUpdates(accuracy = this.state.accuracy) {
     await Location.startLocationUpdatesAsync(LOCATION_UPDATES_TASK, {
@@ -121,25 +154,45 @@ export default class App extends React.Component {
     this.setState({ isTracking: true });
   }
 
+  async stopRecordingAudio() {
+    try {
+      await this.recording.stopAndUnloadAsync();
+    } catch (error) {
+      // Do nothing -- we are already unloaded.
+    }
+  }
+
+  resetRecordingAudio() {
+    this.recording = null;
+  }
+
+  async resetLocations() {
+    await AsyncStorage.removeItem(STORAGE_KEY);
+    this.setState({ savedLocations: [] });
+  }
+
   async stopLocationUpdates() {
     await Location.stopLocationUpdatesAsync(LOCATION_UPDATES_TASK);
     this.setState({ isTracking: false });
   }
 
-  clearLocations = async () => {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify([]));
-    this.setState({ savedLocations: [] });
-  };
+  async saveLocationsAndRecording() {
+    const info = await FileSystem.getInfoAsync(this.recording.getURI());
+    console.log(`FILE INFO: ${JSON.stringify(info)}`);
+    console.log(`LOCATIONS: ${JSON.stringify(this.state.savedLocations)}`);
+  }
 
   toggleTracking = async () => {
-    await AsyncStorage.removeItem(STORAGE_KEY);
-
     if (this.state.isTracking) {
       await this.stopLocationUpdates();
+      await this.stopRecordingAudio();
+      await this.saveLocationsAndRecording();
+      this.resetRecordingAudio();
+      await this.resetLocations();
     } else {
       await this.startLocationUpdates();
+      await this.startRecordingAudio();
     }
-    this.setState({ savedLocations: [] });
   };
 
   onAccuracyChange = () => {
@@ -210,7 +263,8 @@ export default class App extends React.Component {
           ref={this.mapViewRef}
           style={styles.mapView}
           initialRegion={this.state.initialRegion}
-          showsUserLocation>
+          showsUserLocation
+        >
           {this.renderPolyline()}
         </MapView>
         <View style={styles.buttons} pointerEvents="box-none">
@@ -236,12 +290,16 @@ export default class App extends React.Component {
           </View>
 
           <View style={styles.bottomButtons}>
-            <Button style={styles.button} onPress={this.clearLocations}>
-              Clear locations
-            </Button>
-            <Button style={styles.button} onPress={this.toggleTracking}>
-              {this.state.isTracking ? 'Stop tracking' : 'Start tracking'}
-            </Button>
+            {this.state.isTracking ? (
+              <Button style={[styles.button, styles.bigButton, this.state.isTracking ? styles.trackingButton : null]} onPress={this.toggleTracking}>
+                <Text >Stop tracking</Text>
+                <ActivityIndicator style={{ paddingLeft: 15 }} size={15} color="#fff" />
+              </Button>
+            ) : (
+              <Button style={[styles.button, styles.bigButton]} onPress={this.toggleTracking}>
+                <Text>Start tracking</Text>
+              </Button>
+            )}
           </View>
         </View>
       </View>
@@ -262,9 +320,10 @@ if (Platform.OS !== 'android') {
   TaskManager.defineTask(LOCATION_UPDATES_TASK, async ({ data: { locations } }) => {
     if (locations && locations.length > 0) {
       const savedLocations = await getSavedLocations();
-      const newLocations = locations.map(({ coords }) => ({
+      const newLocations = locations.map(({ coords, timestamp }) => ({
         latitude: coords.latitude,
         longitude: coords.longitude,
+        timestamp: timestamp,
       }));
 
       savedLocations.push(...newLocations);
@@ -296,10 +355,12 @@ const styles = StyleSheet.create({
   topButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    marginTop: 40,
   },
   bottomButtons: {
     flexDirection: 'column',
-    alignItems: 'flex-end',
+    alignItems: 'center',
+    marginBottom: 40,
   },
   buttonsColumn: {
     flexDirection: 'column',
@@ -309,6 +370,15 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     paddingHorizontal: 10,
     marginVertical: 5,
+  },
+  bigButton: {
+    paddingLeft: 50,
+    paddingRight: 50,
+    paddingBottom: 20,
+    paddingTop: 20,
+  },
+  trackingButton: {
+    backgroundColor: Colors.darkTintColor,
   },
   errorText: {
     fontSize: 15,
